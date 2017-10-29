@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"hash"
@@ -51,9 +52,13 @@ type MeasuredResponse struct {
 func newClient(
 	compress bool,
 	https bool,
+	clientCertificate bool,
 	noreuse bool,
 	maxConn int,
 	timeout time.Duration,
+	certFile string,
+	keyFile string,
+	caFile string,
 ) *http.Client {
 	tr := http.Transport{
 		DisableCompression:  !compress,
@@ -66,7 +71,26 @@ func newClient(
 		TLSHandshakeTimeout: 5 * time.Second,
 	}
 	if https {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		if clientCertificate {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			caCert, err := ioutil.ReadFile(caFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			caCertPool := x509.NewCertPool()
+			caCertPool.AppendCertsFromPEM(caCert)
+
+			tr.TLSClientConfig = &tls.Config{
+				Certificates:       []tls.Certificate{cert},
+				RootCAs:            caCertPool,
+				InsecureSkipVerify: true,
+			}
+		} else {
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
 	}
 	return &http.Client{
 		Timeout:   timeout,
@@ -270,6 +294,10 @@ func main() {
 	metricAddr := flag.String("metric-addr", "", "address to serve metrics on")
 	hashValue := flag.Uint64("hashValue", 0, "fnv-1a hash value to check the request body against")
 	hashSampleRate := flag.Float64("hashSampleRate", 0.0, "Sampe Rate for checking request body's hash. Interval in the range of [0.0, 1.0]")
+	useClientCertificate := flag.Bool("clientCertificate", false, "Use client certificate with request")
+	certFile := flag.String("cert", "certificate.pem", "A PEM eoncoded certificate file.")
+	keyFile := flag.String("key", "private.key", "A PEM encoded private key file.")
+	caFile := flag.String("CA", "ca-bundle.pem", "A PEM eoncoded CA's certificate file.")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <url> [flags]\n", path.Base(os.Args[0]))
@@ -325,7 +353,7 @@ func main() {
 	totalTrafficTarget = *qps * *concurrency * int(interval.Seconds())
 
 	doTLS := dstURL.Scheme == "https"
-	client := newClient(*compress, doTLS, *noreuse, *concurrency, *clientTimeout)
+	client := newClient(*compress, doTLS, *noreuse, *concurrency, *clientTimeout, *useClientCertificate, *certFile, *keyFile, *caFile)
 	var sendTraffic sync.WaitGroup
 	// The time portion of the header can change due to timezone.
 	timeLen := len(time.Now().Format(time.RFC3339))
